@@ -58,7 +58,9 @@ name: Sync admin edits
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # Cron is UTC. Vietnam (ICT) is UTC+7.
+    - cron: "5 1-13 * * 1-5"     # Mon–Fri, hourly 08:05–20:05 ICT
+    - cron: "5 1-13/4 * * 0,6"   # Sat–Sun, 08:05 / 12:05 / 16:05 / 20:05 ICT
   workflow_dispatch:
 
 permissions:
@@ -157,10 +159,11 @@ locales/*.json
   the live theme would otherwise be deleted in the PR. Set `delete: true` to mirror deletions.
 - **Don't push to the sync branch.** It is rebuilt from the base branch on every run, so extra commits
   are lost. Merge the PR, then make follow-up changes on your own branch.
-- **Schedule and cost.** A 30-minute schedule is 48 runs a day of roughly one billed minute each,
-  about 1,500 minutes per repository per month. Public repositories are free; on private repositories
-  consider working hours only, e.g. `"*/30 1-12 * * 1-6"` (cron is in UTC). GitHub may delay scheduled runs
-  under load.
+- **Schedule and cost.** Cron runs in UTC; convert from your local time zone. The example syncs hourly
+  during Vietnam business hours on weekdays and every 4 hours on weekends: 73 runs a week of roughly
+  one billed minute each, about 320 minutes per repository per month. Syncing every 30 minutes around
+  the clock would cost about 1,500. Public repositories are free. GitHub may delay or drop scheduled
+  runs under load, especially at the top of the hour, so the example runs at minute 5.
 - **Several stores or themes.** Call the workflow once per store/theme, each with its own `branch`
   so their pull requests don't overwrite each other.
 - **Versions.** Pin `@v1` for compatible updates, or a commit SHA for full control.

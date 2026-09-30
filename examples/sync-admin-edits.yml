@@ -3,7 +3,9 @@ name: Sync admin edits
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # Cron is UTC. Vietnam (ICT) is UTC+7.
+    - cron: "5 1-13 * * 1-5"     # Mon–Fri, hourly 08:05–20:05 ICT
+    - cron: "5 1-13/4 * * 0,6"   # Sat–Sun, 08:05 / 12:05 / 16:05 / 20:05 ICT
   workflow_dispatch:
 
 permissions:
