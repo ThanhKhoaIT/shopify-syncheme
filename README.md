@@ -111,6 +111,48 @@ workflow a different token. Pick one option:
 Create a token with **Contents** and **Pull requests** read/write on the repository, store it as
 `SYNC_PR_TOKEN`, and pass `PR_TOKEN: ${{ secrets.SYNC_PR_TOKEN }}` under `secrets`.
 
+## Slack notifications
+
+Post a message to Slack when the sync PR is opened or gets new changes. Runs where nothing
+changed stay silent.
+
+1. Create a Slack app at <https://api.slack.com/apps>, enable **Incoming Webhooks** and add a
+   webhook for your channel (e.g. `#theme-edits`).
+2. Store the webhook URL as the secret `SLACK_WEBHOOK_URL` (repository or organization).
+3. Pass it to the workflow:
+
+```yaml
+    with:
+      store: your-store
+      slack-mention: "<!subteam^S0123>"   # optional: user group (<!subteam^ID>) or user (<@U0123>)
+    secrets:
+      SHOPIFY_THEME_ACCESS_PASSWORD: ${{ secrets.SHOPIFY_THEME_ACCESS_PASSWORD }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+```
+
+The message looks like:
+
+```
+🛍️ Theme edits on your-store (live) · PR opened
+Sync theme updates · your-org/your-repo
+• themes/main/templates/index.json
+• themes/main/sections/header-group.json
+```
+
+Up to 10 files are listed. A failed Slack request fails the run (the PR is already created by then).
+
+For other channels (Discord, Teams, email), leave `SLACK_WEBHOOK_URL` unset and add your own job
+that reads the workflow outputs:
+
+```yaml
+  notify:
+    needs: sync
+    if: contains(fromJSON('["created","updated"]'), needs.sync.outputs.pull-request-operation)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "PR ${{ needs.sync.outputs.pull-request-url }}"   # replace with your notifier
+```
+
 ## Inputs
 
 | Input | Default | Description |
@@ -128,6 +170,8 @@ Create a token with **Contents** and **Pull requests** read/write on the reposit
 | `reviewers` | empty | GitHub usernames to request a review from. |
 | `app-id` | empty | GitHub App ID, used with the `APP_PRIVATE_KEY` secret. |
 | `cli-version` | `latest` | `@shopify/cli` version. |
+| `slack-mention` | empty | Text appended to the Slack message, e.g. `<!subteam^S0123>`. |
+| `slack-on` | `created,updated` | PR operations that post to Slack (`created`, `updated`, `closed`). |
 
 Default `only`:
 
@@ -144,11 +188,13 @@ locales/*.json
 | `SHOPIFY_THEME_ACCESS_PASSWORD` | yes | Theme Access password for the store. |
 | `APP_PRIVATE_KEY` | no | Private key of the GitHub App given in `app-id`. |
 | `PR_TOKEN` | no | Token used instead of a GitHub App. |
+| `SLACK_WEBHOOK_URL` | no | Slack Incoming Webhook URL. No Slack message is sent without it. |
 
 | Output | Description |
 | --- | --- |
 | `pull-request-url` | URL of the sync PR. |
 | `pull-request-operation` | `created`, `updated`, `closed` or `none`. |
+| `changed-files` | Newline-separated paths that differ from the base branch. |
 
 ## Things to know
 

@@ -61,6 +61,14 @@ on:
         description: "@shopify/cli version to install."
         type: string
         default: latest
+      slack-mention:
+        description: Appended to the Slack message, e.g. "<!subteam^S0123>" or "<@U0123>".
+        type: string
+        default: ""
+      slack-on:
+        description: Comma-separated pull request operations that trigger a Slack message (created, updated, closed).
+        type: string
+        default: created,updated
     secrets:
       SHOPIFY_THEME_ACCESS_PASSWORD:
         description: Theme Access app password (shptka_...) for the store.
@@ -71,12 +79,18 @@ on:
       PR_TOKEN:
         description: Fine-grained PAT used instead of a GitHub App so the pull request triggers CI.
         required: false
+      SLACK_WEBHOOK_URL:
+        description: Slack Incoming Webhook URL. When set, a message is posted when the pull request changes.
+        required: false
     outputs:
       pull-request-url:
         value: ${{ jobs.sync.outputs.pull-request-url }}
       pull-request-operation:
         description: created, updated, closed or none.
         value: ${{ jobs.sync.outputs.pull-request-operation }}
+      changed-files:
+        description: Newline-separated paths that differ from the base branch.
+        value: ${{ jobs.sync.outputs.changed-files }}
 
 jobs:
   sync:
@@ -85,9 +99,12 @@ jobs:
     concurrency:
       group: shopify-theme-sync-${{ github.repository }}-${{ inputs.branch }}
       cancel-in-progress: false
+    env:
+      HAS_SLACK: ${{ secrets.SLACK_WEBHOOK_URL != '' }}
     outputs:
       pull-request-url: ${{ steps.pr.outputs.pull-request-url }}
       pull-request-operation: ${{ steps.pr.outputs.pull-request-operation }}
+      changed-files: ${{ steps.changes.outputs.files }}
     steps:
       - id: app-token
         if: inputs.app-id != ''
@@ -137,8 +154,11 @@ jobs:
           STORE: ${{ inputs.store }}
           THEME: ${{ inputs.theme }}
         run: |
-          files="$(git status --porcelain -- "$THEME_PATH")"
+          files="$(git status --porcelain --untracked-files=all -- "$THEME_PATH")"
           {
+            echo "files<<__SYNC_EOF__"
+            [ -n "$files" ] && echo "$files" | cut -c4-
+            echo "__SYNC_EOF__"
             echo "body<<__SYNC_EOF__"
             echo "Automated pull of admin/theme-editor edits from \`${STORE}\` (theme: ${THEME:-live})."
             echo
@@ -173,3 +193,48 @@ jobs:
           labels: ${{ inputs.labels }}
           reviewers: ${{ inputs.reviewers }}
           delete-branch: true
+
+      - name: Build Slack message
+        id: slack
+        if: env.HAS_SLACK == 'true' && contains(format(',{0},', inputs.slack-on), format(',{0},', steps.pr.outputs.pull-request-operation))
+        env:
+          STORE: ${{ inputs.store }}
+          THEME: ${{ inputs.theme }}
+          OPERATION: ${{ steps.pr.outputs.pull-request-operation }}
+          PR_URL: ${{ steps.pr.outputs.pull-request-url }}
+          PR_TITLE: ${{ inputs.pr-title }}
+          FILES: ${{ steps.changes.outputs.files }}
+          MENTION: ${{ inputs.slack-mention }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+
+          def esc(s: str) -> str:
+              return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+          env = os.environ
+          verb = {"created": "PR opened", "updated": "PR updated", "closed": "PR closed"}.get(env["OPERATION"], env["OPERATION"])
+          files = [f for f in env["FILES"].splitlines() if f.strip()]
+          lines = [
+              f"🛍️ *Theme edits on `{esc(env['STORE'])}` ({esc(env['THEME'] or 'live')})* · {verb}",
+              f"<{env['PR_URL']}|{esc(env['PR_TITLE'])}> · {esc(env['GITHUB_REPOSITORY'])}",
+          ]
+          lines += [f"• `{esc(f)}`" for f in files[:10]]
+          if len(files) > 10:
+              lines.append(f"… and {len(files) - 10} more")
+          if env["MENTION"]:
+              lines.append(env["MENTION"])
+          text = "\n".join(lines)
+          payload = {"text": text, "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]}
+          with open(os.path.join(env["RUNNER_TEMP"], "slack-payload.json"), "w") as fh:
+              json.dump(payload, fh)
+          PY
+
+      - name: Notify Slack
+        if: steps.slack.outcome == 'success'
+        uses: slackapi/slack-github-action@v4
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload-file-path: ${{ runner.temp }}/slack-payload.json
+          errors: true
