@@ -91,6 +91,9 @@ on:
       changed-files:
         description: Newline-separated paths that differ from the base branch.
         value: ${{ jobs.sync.outputs.changed-files }}
+      diff-summary:
+        description: 'JSON {"totals": {files, additions, deletions}, "files": [{path, file, status, additions, deletions, binary, details}]}.'
+        value: ${{ jobs.sync.outputs.diff-summary }}
 
 jobs:
   sync:
@@ -105,6 +108,7 @@ jobs:
       pull-request-url: ${{ steps.pr.outputs.pull-request-url }}
       pull-request-operation: ${{ steps.pr.outputs.pull-request-operation }}
       changed-files: ${{ steps.changes.outputs.files }}
+      diff-summary: ${{ steps.changes.outputs.summary }}
     steps:
       - id: app-token
         if: inputs.app-id != ''
@@ -154,31 +158,163 @@ jobs:
           STORE: ${{ inputs.store }}
           THEME: ${{ inputs.theme }}
         run: |
-          files="$(git status --porcelain --untracked-files=all -- "$THEME_PATH")"
-          {
-            echo "files<<__SYNC_EOF__"
-            [ -n "$files" ] && echo "$files" | cut -c4-
-            echo "__SYNC_EOF__"
-            echo "body<<__SYNC_EOF__"
-            echo "Automated pull of admin/theme-editor edits from \`${STORE}\` (theme: ${THEME:-live})."
-            echo
-            echo "Pulled at $(date -u '+%Y-%m-%d %H:%M UTC') by [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
-            echo
-            if [ -n "$files" ]; then
-              echo '```'
-              echo "$files"
-              echo '```'
-            else
-              echo "No changes."
-            fi
-            echo
-            echo "This branch is rebuilt from the base branch on every run. Do not push commits to it."
-            echo "__SYNC_EOF__"
-          } >> "$GITHUB_OUTPUT"
-          {
-            echo "### Shopify theme sync"
-            if [ -n "$files" ]; then echo '```'; echo "$files"; echo '```'; else echo "No changes."; fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import json, os, re, subprocess
+          from datetime import datetime, timezone
+
+          env = os.environ
+          theme_path = env["THEME_PATH"]
+          prefix = "" if theme_path in (".", "./", "") else theme_path.rstrip("/") + "/"
+          MAX_NAMES = 3
+
+          def git(*args: str, check: bool = True) -> str:
+              return subprocess.run(["git", *args], capture_output=True, text=True, check=check).stdout
+
+          def load_json(text: str):
+              # Shopify prepends a /* ... */ notice to JSON files it writes.
+              return json.loads(re.sub(r"^\s*/\*.*?\*/", "", text, count=1, flags=re.S))
+
+          def names(keys: list) -> str:
+              shown = ", ".join(keys[:MAX_NAMES])
+              return shown + (f", +{len(keys) - MAX_NAMES}" if len(keys) > MAX_NAMES else "")
+
+          def plural(n: int, word: str) -> str:
+              return f"{n} {word}" + ("" if n == 1 else "s")
+
+          def section_label(key: str, *sources: dict) -> str:
+              # Keys added in the theme editor are random ids; the section's name or type reads better.
+              for src in sources:
+                  sec = src.get(key)
+                  if isinstance(sec, dict) and (sec.get("name") or sec.get("type")):
+                      return str(sec.get("name") or sec.get("type"))
+              return key
+
+          def diff_keys(old: dict, new: dict):
+              added = [k for k in new if k not in old]
+              removed = [k for k in old if k not in new]
+              edited = [k for k in new if k in old and new[k] != old[k]]
+              return added, removed, edited
+
+          def flatten(value, path=""):
+              if isinstance(value, dict):
+                  out = {}
+                  for k, v in value.items():
+                      out.update(flatten(v, f"{path}.{k}" if path else k))
+                  return out
+              return {path: value}
+
+          def describe_sections(old: dict, new: dict) -> list:
+              parts = []
+              old_s, new_s = old.get("sections") or {}, new.get("sections") or {}
+              added, removed, edited = diff_keys(old_s, new_s)
+              label_of = lambda keys: [section_label(k, new_s, old_s) for k in keys]
+              counts = [f"{len(v)} {label} ({names(label_of(v))})" for label, v in (("edited", edited), ("added", added), ("removed", removed)) if v]
+              if counts:
+                  parts.append("sections: " + "; ".join(counts))
+              common = set(old.get("order") or []) & set(new.get("order") or [])
+              if [k for k in old.get("order") or [] if k in common] != [k for k in new.get("order") or [] if k in common]:
+                  parts.append("order changed")
+              other = [k for k in set(old) | set(new) if k not in ("sections", "order") and old.get(k) != new.get(k)]
+              if other:
+                  parts.append(f"{plural(len(other), 'template setting')} changed ({names(sorted(other))})")
+              return parts
+
+          def describe(rel: str, status: str, old_text, new_text) -> str:
+              if not rel.endswith(".json"):
+                  return ""
+              try:
+                  old = load_json(old_text) if old_text is not None else None
+                  new = load_json(new_text) if new_text is not None else None
+              except ValueError as e:
+                  print(f"::warning file={prefix}{rel}::could not parse JSON: {e}")
+                  return ""
+              if status == "deleted":
+                  return "removed"
+              if old is None:
+                  n = len((new or {}).get("sections") or {}) if isinstance(new, dict) else 0
+                  return f"new file ({plural(n, 'section')})" if n else "new file"
+              if rel == "config/settings_data.json":
+                  cur_old, cur_new = old.get("current"), new.get("current")
+                  if isinstance(cur_old, str) or isinstance(cur_new, str):
+                      return "preset changed" if cur_old != cur_new else "no setting changes"
+                  a, r, e = diff_keys(flatten(cur_old or {}), flatten(cur_new or {}))
+                  keys = sorted(set(a + r + e))
+                  return f"{plural(len(keys), 'setting')} changed ({names(keys)})" if keys else "formatting only"
+              if rel.startswith("locales/"):
+                  a, r, e = diff_keys(flatten(old), flatten(new))
+                  n = len(a) + len(r) + len(e)
+                  return f"{plural(n, 'translation')} changed" if n else "formatting only"
+              if isinstance(old, dict) and isinstance(new, dict) and ("sections" in old or "sections" in new):
+                  parts = describe_sections(old, new)
+                  return " · ".join(parts) if parts else "formatting only"
+              return ""
+
+          raw = git("status", "--porcelain", "--untracked-files=all", "-z", "--", theme_path).split("\0")
+          entries, i = [], 0
+          while i < len(raw):
+              item = raw[i]
+              i += 1
+              if not item:
+                  continue
+              code, path = item[:2], item[3:]
+              if code[0] in "RC":
+                  i += 1  # skip the original path
+              status = {"??": "added"}.get(code) or {"A": "added", "D": "deleted", "R": "renamed", "C": "copied"}.get(code.strip()[:1], "modified")
+              entries.append((status, path))
+
+          files = []
+          for status, path in sorted(entries, key=lambda e: e[1]):
+              rel = path[len(prefix):] if path.startswith(prefix) else path
+              if status == "added":
+                  out = git("diff", "--no-index", "--numstat", "--", "/dev/null", path, check=False)
+              else:
+                  out = git("diff", "--numstat", "HEAD", "--", path)
+              fields = out.split("\t") if out else ["0", "0"]
+              binary = fields[0] == "-"
+              plus, minus = (0, 0) if binary else (int(fields[0]), int(fields[1]))
+              old_text = None if status == "added" else git("show", f"HEAD:{path}", check=False) or None
+              new_text = None
+              if status != "deleted" and os.path.exists(path):
+                  with open(path, encoding="utf-8", errors="replace") as fh:
+                      new_text = fh.read()
+              files.append({
+                  "path": path, "file": rel, "status": status,
+                  "additions": plus, "deletions": minus, "binary": binary,
+                  "details": describe(rel, status, old_text, new_text),
+              })
+
+          totals = {"files": len(files), "additions": sum(f["additions"] for f in files), "deletions": sum(f["deletions"] for f in files)}
+          summary = {"totals": totals, "files": files}
+
+          def md_cell(s: str) -> str:
+              return s.replace("|", "\\|") or "—"
+
+          table = ["| File | Status | +/− | Details |", "| --- | --- | --- | --- |"]
+          for f in files:
+              delta = "binary" if f["binary"] else f"+{f['additions']} −{f['deletions']}"
+              table.append(f"| `{f['file']}` | {f['status']} | {delta} | {md_cell(f['details'])} |")
+
+          now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+          run_url = f"{env['GITHUB_SERVER_URL']}/{env['GITHUB_REPOSITORY']}/actions/runs/{env['GITHUB_RUN_ID']}"
+          body = [
+              f"Automated pull of admin/theme-editor edits from `{env['STORE']}` (theme: {env['THEME'] or 'live'}).",
+              "",
+              f"Pulled at {now} by [run {env['GITHUB_RUN_ID']}]({run_url}).",
+              "",
+          ]
+          if files:
+              body += [f"**{totals['files']} files · +{totals['additions']} −{totals['deletions']}**", "", *table]
+          else:
+              body.append("No changes.")
+          body += ["", "This branch is rebuilt from the base branch on every run. Do not push commits to it."]
+
+          with open(env["GITHUB_OUTPUT"], "a") as out:
+              out.write("files<<__SYNC_EOF__\n" + "".join(f["path"] + "\n" for f in files) + "__SYNC_EOF__\n")
+              out.write("summary<<__SYNC_EOF__\n" + json.dumps(summary, ensure_ascii=False) + "\n__SYNC_EOF__\n")
+              out.write("body<<__SYNC_EOF__\n" + "\n".join(body) + "\n__SYNC_EOF__\n")
+          with open(env["GITHUB_STEP_SUMMARY"], "a") as out:
+              out.write("### Shopify theme sync\n\n" + ("\n".join(table) if files else "No changes.") + "\n")
+          PY
 
       - id: pr
         uses: peter-evans/create-pull-request@v8
@@ -203,31 +339,59 @@ jobs:
           OPERATION: ${{ steps.pr.outputs.pull-request-operation }}
           PR_URL: ${{ steps.pr.outputs.pull-request-url }}
           PR_TITLE: ${{ inputs.pr-title }}
-          FILES: ${{ steps.changes.outputs.files }}
+          SUMMARY: ${{ steps.changes.outputs.summary }}
           MENTION: ${{ inputs.slack-mention }}
         run: |
           python3 - <<'PY'
           import json, os
 
+          env = os.environ
+          MAX_ROWS = 50
+
           def esc(s: str) -> str:
               return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-          env = os.environ
+          def cell(text: str) -> dict:
+              return {"type": "raw_text", "text": text or "—"}
+
+          summary = json.loads(env["SUMMARY"])
+          files, totals = summary["files"], summary["totals"]
           verb = {"created": "PR opened", "updated": "PR updated", "closed": "PR closed"}.get(env["OPERATION"], env["OPERATION"])
-          files = [f for f in env["FILES"].splitlines() if f.strip()]
-          lines = [
-              f"🛍️ *Theme edits on `{esc(env['STORE'])}` ({esc(env['THEME'] or 'live')})* · {verb}",
-              f"<{env['PR_URL']}|{esc(env['PR_TITLE'])}> · {esc(env['GITHUB_REPOSITORY'])}",
+          theme = env["THEME"] or "live"
+          headline = f"🛍️ Theme edits on {env['STORE']} ({theme}) · {verb} · {totals['files']} files · +{totals['additions']} −{totals['deletions']}"
+
+          store_handle = env["STORE"].removesuffix(".myshopify.com")
+          links = [
+              f"<{env['PR_URL']}|{esc(env['PR_TITLE'])}>",
+              f"<{env['PR_URL']}/files|Files changed>",
+              f"<https://admin.shopify.com/store/{store_handle}/themes|Theme editor>",
+              esc(env["GITHUB_REPOSITORY"]),
           ]
-          lines += [f"• `{esc(f)}`" for f in files[:10]]
-          if len(files) > 10:
-              lines.append(f"… and {len(files) - 10} more")
-          if env["MENTION"]:
-              lines.append(env["MENTION"])
-          text = "\n".join(lines)
-          payload = {"text": text, "blocks": [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]}
+          context = " · ".join(links) + (f" · {env['MENTION']}" if env["MENTION"] else "")
+
+          rows = [[cell("File"), cell("Status"), cell("+/−"), cell("Details")]]
+          for f in files[:MAX_ROWS]:
+              delta = "binary" if f["binary"] else f"+{f['additions']} −{f['deletions']}"
+              rows.append([cell(f["file"]), cell(f["status"]), cell(delta), cell(f["details"])])
+          if len(files) > MAX_ROWS:
+              rows.append([cell(f"… and {len(files) - MAX_ROWS} more"), cell(""), cell(""), cell("")])
+
+          payload = {
+              "text": headline,
+              "blocks": [{
+                  "type": "container",
+                  "block_id": "bkb_container_collapsible",
+                  "title": {"type": "plain_text", "text": headline[:150]},
+                  "is_collapsible": True,
+                  "default_collapsed": len(files) > 10,
+                  "child_blocks": [
+                      {"type": "section", "text": {"type": "mrkdwn", "text": context}},
+                      {"type": "table", "column_settings": [{"is_wrapped": True}, {}, {"align": "right"}, {"is_wrapped": True}], "rows": rows},
+                  ],
+              }],
+          }
           with open(os.path.join(env["RUNNER_TEMP"], "slack-payload.json"), "w") as fh:
-              json.dump(payload, fh)
+              json.dump(payload, fh, ensure_ascii=False)
           PY
 
       - name: Notify Slack

@@ -130,19 +130,35 @@ changed stay silent.
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 ```
 
-The message looks like:
+The message is a collapsible container with a table of changed files:
 
 ```
-🛍️ Theme edits on your-store (live) · PR opened
-Sync theme updates · your-org/your-repo
-• themes/main/templates/index.json
-• themes/main/sections/header-group.json
+▼ 🛍️ Theme edits on your-store (live) · PR updated · 4 files · +31 −7
+  Sync theme updates · Files changed · Theme editor · your-org/your-repo · @mention
+
+  File                        Status    +/−     Details
+  templates/index.json        modified  +10 −3  sections: 1 edited (_blocks); 1 added (image-banner) · order changed
+  templates/product.gift.json added     +14 −0  new file (2 sections)
+  sections/header-group.json  modified  +2 −1   sections: 1 edited (announcement-bar)
+  config/settings_data.json   modified  +3 −1   2 settings changed (colors_accent_1, new_flag)
 ```
 
-Up to 10 files are listed. A failed Slack request fails the run (the PR is already created by then).
+**Details** compares the JSON before and after the pull, so reviewers see what changed on the page
+instead of a raw JSON diff:
+
+| File | Details |
+| --- | --- |
+| `templates/*.json`, `sections/*.json` | Sections added, removed or edited (by name or type) and whether their order changed |
+| `config/settings_data.json` | Theme settings that changed |
+| `locales/*.json` | Number of translations that changed |
+
+Up to 50 files are listed; the container starts collapsed when more than 10 files changed. The pull
+request body contains the same table. A failed Slack request fails the run (the PR is already
+created by then).
 
 For other channels (Discord, Teams, email), leave `SLACK_WEBHOOK_URL` unset and add your own job
-that reads the workflow outputs:
+that reads the workflow outputs (`pull-request-url`, `pull-request-operation`, `changed-files`,
+`diff-summary`):
 
 ```yaml
   notify:
@@ -195,6 +211,7 @@ locales/*.json
 | `pull-request-url` | URL of the sync PR. |
 | `pull-request-operation` | `created`, `updated`, `closed` or `none`. |
 | `changed-files` | Newline-separated paths that differ from the base branch. |
+| `diff-summary` | JSON: `totals` (`files`, `additions`, `deletions`) and `files` (`path`, `file`, `status`, `additions`, `deletions`, `binary`, `details`). |
 
 ## Things to know
 
