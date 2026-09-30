@@ -381,7 +381,7 @@ jobs:
               "blocks": [{
                   "type": "container",
                   "block_id": "bkb_container_collapsible",
-                  "title": {"type": "plain_text", "text": headline[:150]},
+                  "title": {"type": "plain_text", "text": headline[:150], "emoji": True},
                   "is_collapsible": True,
                   "default_collapsed": len(files) > 10,
                   "child_blocks": [
