@@ -1,0 +1,175 @@
+# Reusable workflow: pull a Shopify theme (live by default) into the caller repo and
+# open/update a single pull request with whatever merchants changed in the theme editor.
+# Read-only against Shopify — it never pushes or publishes a theme.
+name: Shopify theme sync
+
+on:
+  workflow_call:
+    inputs:
+      store:
+        description: Store handle or domain, e.g. "my-store" or "my-store.myshopify.com".
+        required: true
+        type: string
+      theme-path:
+        description: Theme folder inside the repo.
+        type: string
+        default: "."
+      theme:
+        description: Theme ID or name to pull. Empty pulls the live (published) theme.
+        type: string
+        default: ""
+      only:
+        description: Newline-separated glob patterns (relative to theme-path) to pull. Empty pulls everything.
+        type: string
+        default: |
+          templates/*.json
+          templates/customers/*.json
+          sections/*.json
+          config/settings_data.json
+          locales/*.json
+      delete:
+        description: Delete local files that no longer exist on the theme (within the `only` patterns).
+        type: boolean
+        default: false
+      branch:
+        description: Fixed branch the pull request is opened from. Rebuilt from base on every run.
+        type: string
+        default: sync/admin-edits
+      base:
+        description: Base branch of the pull request. Empty uses the repository default branch.
+        type: string
+        default: ""
+      pr-title:
+        type: string
+        default: Sync theme updates
+      commit-message:
+        type: string
+        default: Sync theme updates from Shopify admin
+      labels:
+        description: Comma- or newline-separated labels to add to the pull request.
+        type: string
+        default: ""
+      reviewers:
+        description: Comma- or newline-separated GitHub usernames to request a review from.
+        type: string
+        default: ""
+      app-id:
+        description: GitHub App ID. Set it (with the APP_PRIVATE_KEY secret) so the pull request triggers CI.
+        type: string
+        default: ""
+      cli-version:
+        description: "@shopify/cli version to install."
+        type: string
+        default: latest
+    secrets:
+      SHOPIFY_THEME_ACCESS_PASSWORD:
+        description: Theme Access app password (shptka_...) for the store.
+        required: true
+      APP_PRIVATE_KEY:
+        description: Private key of the GitHub App given in `app-id`.
+        required: false
+      PR_TOKEN:
+        description: Fine-grained PAT used instead of a GitHub App so the pull request triggers CI.
+        required: false
+    outputs:
+      pull-request-url:
+        value: ${{ jobs.sync.outputs.pull-request-url }}
+      pull-request-operation:
+        description: created, updated, closed or none.
+        value: ${{ jobs.sync.outputs.pull-request-operation }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: shopify-theme-sync-${{ github.repository }}-${{ inputs.branch }}
+      cancel-in-progress: false
+    outputs:
+      pull-request-url: ${{ steps.pr.outputs.pull-request-url }}
+      pull-request-operation: ${{ steps.pr.outputs.pull-request-operation }}
+    steps:
+      - id: app-token
+        if: inputs.app-id != ''
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ inputs.app-id }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.base }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install Shopify CLI
+        env:
+          CLI_VERSION: ${{ inputs.cli-version }}
+        run: npm install -g "@shopify/cli@${CLI_VERSION}"
+
+      - name: Pull theme
+        env:
+          SHOPIFY_CLI_THEME_TOKEN: ${{ secrets.SHOPIFY_THEME_ACCESS_PASSWORD }}
+          SHOPIFY_CLI_NO_ANALYTICS: "1"
+          STORE: ${{ inputs.store }}
+          THEME_PATH: ${{ inputs.theme-path }}
+          THEME: ${{ inputs.theme }}
+          ONLY: ${{ inputs.only }}
+          DELETE: ${{ inputs.delete }}
+        run: |
+          args=(theme pull --store "$STORE" --path "$THEME_PATH")
+          if [ -n "$THEME" ]; then args+=(--theme "$THEME"); else args+=(--live); fi
+          [ "$DELETE" = "true" ] || args+=(--nodelete)
+          while IFS= read -r pattern; do
+            pattern="$(echo "$pattern" | xargs)"
+            [ -n "$pattern" ] && args+=(--only "$pattern")
+          done <<< "$ONLY"
+          echo "shopify ${args[*]}"
+          shopify "${args[@]}"
+
+      - name: Summarize changes
+        id: changes
+        env:
+          THEME_PATH: ${{ inputs.theme-path }}
+          STORE: ${{ inputs.store }}
+          THEME: ${{ inputs.theme }}
+        run: |
+          files="$(git status --porcelain -- "$THEME_PATH")"
+          {
+            echo "body<<__SYNC_EOF__"
+            echo "Automated pull of admin/theme-editor edits from \`${STORE}\` (theme: ${THEME:-live})."
+            echo
+            echo "Pulled at $(date -u '+%Y-%m-%d %H:%M UTC') by [run ${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+            echo
+            if [ -n "$files" ]; then
+              echo '```'
+              echo "$files"
+              echo '```'
+            else
+              echo "No changes."
+            fi
+            echo
+            echo "This branch is rebuilt from the base branch on every run. Do not push commits to it."
+            echo "__SYNC_EOF__"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Shopify theme sync"
+            if [ -n "$files" ]; then echo '```'; echo "$files"; echo '```'; else echo "No changes."; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: pr
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ steps.app-token.outputs.token || secrets.PR_TOKEN || github.token }}
+          branch: ${{ inputs.branch }}
+          base: ${{ inputs.base }}
+          add-paths: ${{ inputs.theme-path }}
+          commit-message: ${{ inputs.commit-message }}
+          title: ${{ inputs.pr-title }}
+          body: ${{ steps.changes.outputs.body }}
+          labels: ${{ inputs.labels }}
+          reviewers: ${{ inputs.reviewers }}
+          delete-branch: true

@@ -1,0 +1,20 @@
+# Copy to .github/workflows/sync-admin-edits.yml in your theme repository.
+name: Sync admin edits
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    uses: ThanhKhoaIT/shopify-syncheme/.github/workflows/sync.yml@v1
+    with:
+      store: your-store
+      theme-path: .
+    secrets:
+      SHOPIFY_THEME_ACCESS_PASSWORD: ${{ secrets.SHOPIFY_THEME_ACCESS_PASSWORD }}
