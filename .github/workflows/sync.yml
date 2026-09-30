@@ -358,7 +358,11 @@ jobs:
           files, totals = summary["files"], summary["totals"]
           verb = {"created": "PR opened", "updated": "PR updated", "closed": "PR closed"}.get(env["OPERATION"], env["OPERATION"])
           theme = env["THEME"] or "live"
-          headline = f"🛍️ Theme edits on {env['STORE']} ({theme}) · {verb} · {totals['files']} files · +{totals['additions']} −{totals['deletions']}"
+          counts = f"{totals['files']} files · +{totals['additions']} −{totals['deletions']}"
+          fallback = f"🛍️ Theme edits on {env['STORE']} ({theme}) · {verb} · {counts}"
+          headline = f":shopping_bags: *Theme edits on `{esc(env['STORE'])}` ({esc(theme)})* · {verb} · `{counts}`"
+          if env["MENTION"]:
+              headline += f" {env['MENTION']}"
 
           store_handle = env["STORE"].removesuffix(".myshopify.com")
           links = [
@@ -367,7 +371,7 @@ jobs:
               f"<https://admin.shopify.com/store/{store_handle}/themes|Theme editor>",
               esc(env["GITHUB_REPOSITORY"]),
           ]
-          context = " · ".join(links) + (f" · {env['MENTION']}" if env["MENTION"] else "")
+          context = " · ".join(links)
 
           rows = [[cell("File"), cell("Status"), cell("+/−"), cell("Details")]]
           for f in files[:MAX_ROWS]:
@@ -377,18 +381,12 @@ jobs:
               rows.append([cell(f"… and {len(files) - MAX_ROWS} more"), cell(""), cell(""), cell("")])
 
           payload = {
-              "text": headline,
-              "blocks": [{
-                  "type": "container",
-                  "block_id": "bkb_container_collapsible",
-                  "title": {"type": "plain_text", "text": headline[:150], "emoji": True},
-                  "is_collapsible": True,
-                  "default_collapsed": len(files) > 10,
-                  "child_blocks": [
-                      {"type": "section", "text": {"type": "mrkdwn", "text": context}},
-                      {"type": "table", "column_settings": [{"is_wrapped": True}, {}, {"align": "right"}, {"is_wrapped": True}], "rows": rows},
-                  ],
-              }],
+              "text": fallback,
+              "blocks": [
+                  {"type": "section", "text": {"type": "mrkdwn", "text": headline}},
+                  {"type": "context", "elements": [{"type": "mrkdwn", "text": context}]},
+                  {"type": "table", "column_settings": [{"is_wrapped": True}, {}, {"align": "right"}, {"is_wrapped": True}], "rows": rows},
+              ],
           }
           with open(os.path.join(env["RUNNER_TEMP"], "slack-payload.json"), "w") as fh:
               json.dump(payload, fh, ensure_ascii=False)
