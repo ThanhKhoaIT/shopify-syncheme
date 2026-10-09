@@ -19,7 +19,7 @@ on:
         type: string
         default: ""
       environment:
-        description: Environment in shopify.theme.toml (inside theme-path), e.g. "production". When set, `only` and `delete` are ignored, `--live` is not added, and the toml decides the theme and which files are pulled. `store` must match the environment's store.
+        description: Environment in shopify.theme.toml (inside theme-path), e.g. "production". When set, `only` and `delete` are ignored and the toml decides which files are pulled. `--live` is added unless `theme` is set or the environment sets `theme`/`live`. `store` must match the environment's store.
         type: string
         default: ""
       only:
@@ -101,6 +101,7 @@ on:
 
 jobs:
   sync:
+    name: Sync
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
@@ -148,9 +149,21 @@ jobs:
         run: |
           args=(theme pull --store "$STORE" --path "$THEME_PATH")
           if [ -n "$ENVIRONMENT" ]; then
-            # Same scope as a local `shopify theme pull -e <env>`: the toml sets theme/live/only/ignore/nodelete.
+            # Same scope as a local `shopify theme pull -e <env> [--live]`: the toml sets only/ignore/nodelete.
             args+=(--environment "$ENVIRONMENT")
-            [ -n "$THEME" ] && args+=(--theme "$THEME")
+            if [ -n "$THEME" ]; then
+              args+=(--theme "$THEME")
+            elif ! python3 - "$THEME_PATH/shopify.theme.toml" "$ENVIRONMENT" <<'PY'
+          import sys, tomllib
+          from pathlib import Path
+
+          toml, name = Path(sys.argv[1]), sys.argv[2]
+          env = tomllib.loads(toml.read_text()).get("environments", {}).get(name, {}) if toml.exists() else {}
+          sys.exit(0 if "theme" in env or "live" in env else 1)
+          PY
+            then
+              args+=(--live)
+            fi
           else
             if [ -n "$THEME" ]; then args+=(--theme "$THEME"); else args+=(--live); fi
             [ "$DELETE" = "true" ] || args+=(--nodelete)

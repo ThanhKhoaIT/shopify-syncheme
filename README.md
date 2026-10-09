@@ -175,7 +175,7 @@ that reads the workflow outputs (`pull-request-url`, `pull-request-operation`, `
 | `store` | (required) | Store handle or `*.myshopify.com` domain. |
 | `theme-path` | `.` | Theme folder inside the repository. |
 | `theme` | empty (live theme) | Theme ID or name to pull instead of the published theme. |
-| `environment` | empty | Environment in `shopify.theme.toml` (inside `theme-path`). When set, `only` and `delete` are ignored and `--live` is not added; the toml picks the theme. |
+| `environment` | empty | Environment in `shopify.theme.toml` (inside `theme-path`). When set, `only` and `delete` are ignored; the live theme is pulled unless `theme` or the environment picks one. |
 | `only` | see below | Newline-separated glob patterns to pull, relative to `theme-path`. Empty pulls every file. |
 | `delete` | `false` | Delete local files (matching `only`) that no longer exist on the theme. |
 | `branch` | `sync/admin-edits` | Branch the PR is opened from. |
@@ -222,8 +222,8 @@ locales/*.json
   the live theme would otherwise be deleted in the PR. Set `delete: true` to mirror deletions.
 - **Match a local `shopify theme pull -e <env>`.** Set `environment` to the same environment from
   `shopify.theme.toml`, so the toml decides the file scope (`only`, `ignore`, `nodelete`) in both places.
-  The environment must also pick the theme (`live = true` or `theme = "<id>"`); `--live` is not added
-  for you, and the `theme` input overrides it. `store` must match the environment's store, because the
+  Like `shopify theme pull -e <env> --live`, `--live` is added unless the `theme` input is set or the
+  environment sets `theme`/`live`. `store` must match the environment's store, because the
   `--store` flag overrides the toml. The CLI deletes local files missing from the theme unless the
   environment sets `nodelete = true`.
   Compare from a clean, up-to-date base branch, and pin `cli-version` to your local CLI version.
