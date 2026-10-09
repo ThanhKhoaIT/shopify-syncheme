@@ -18,6 +18,7 @@ jobs:
     with:
       store: your-store
       theme-path: .
+      # environment: production   # use the same shopify.theme.toml environment as your local pulls
     secrets:
       SHOPIFY_THEME_ACCESS_PASSWORD: ${{ secrets.SHOPIFY_THEME_ACCESS_PASSWORD }}
       SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}   # optional

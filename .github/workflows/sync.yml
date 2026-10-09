@@ -18,6 +18,10 @@ on:
         description: Theme ID or name to pull. Empty pulls the live (published) theme.
         type: string
         default: ""
+      environment:
+        description: Environment in shopify.theme.toml (inside theme-path), e.g. "production". When set, `only` and `delete` are ignored, `--live` is not added, and the toml decides the theme and which files are pulled. `store` must match the environment's store.
+        type: string
+        default: ""
       only:
         description: Newline-separated glob patterns (relative to theme-path) to pull. Empty pulls everything.
         type: string
@@ -138,16 +142,23 @@ jobs:
           STORE: ${{ inputs.store }}
           THEME_PATH: ${{ inputs.theme-path }}
           THEME: ${{ inputs.theme }}
+          ENVIRONMENT: ${{ inputs.environment }}
           ONLY: ${{ inputs.only }}
           DELETE: ${{ inputs.delete }}
         run: |
           args=(theme pull --store "$STORE" --path "$THEME_PATH")
-          if [ -n "$THEME" ]; then args+=(--theme "$THEME"); else args+=(--live); fi
-          [ "$DELETE" = "true" ] || args+=(--nodelete)
-          while IFS= read -r pattern; do
-            pattern="$(echo "$pattern" | xargs)"
-            [ -n "$pattern" ] && args+=(--only "$pattern")
-          done <<< "$ONLY"
+          if [ -n "$ENVIRONMENT" ]; then
+            # Same scope as a local `shopify theme pull -e <env>`: the toml sets theme/live/only/ignore/nodelete.
+            args+=(--environment "$ENVIRONMENT")
+            [ -n "$THEME" ] && args+=(--theme "$THEME")
+          else
+            if [ -n "$THEME" ]; then args+=(--theme "$THEME"); else args+=(--live); fi
+            [ "$DELETE" = "true" ] || args+=(--nodelete)
+            while IFS= read -r pattern; do
+              pattern="$(echo "$pattern" | xargs)"
+              [ -n "$pattern" ] && args+=(--only "$pattern")
+            done <<< "$ONLY"
+          fi
           echo "shopify ${args[*]}"
           shopify "${args[@]}"
 
